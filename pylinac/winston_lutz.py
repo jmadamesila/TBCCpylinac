@@ -884,24 +884,37 @@ class WLImage(image.LinacDicomImage):
         lower_thresh = hmax - spread / 1 #1.5
         # search for the BB by iteratively lowering the low-pass threshold value until the BB is found.
         found = False
+        search_regions = [-2,-4]
+        search_region = -3 # Third largest region is likely to be the BB 99% of the time.
+        tried_other_regions = False
+
         while not found:
+            #print(f"Searching between {hmin:.5f} and {hmax:.5f} using {max_thresh:.5f}")
             try:
                 binary_arr = np.logical_and((max_thresh > self), (self >= lower_thresh))
                 labeled_arr, num_roi = ndimage.measurements.label(binary_arr)
                 roi_sizes, bin_edges = np.histogram(labeled_arr, bins=num_roi + 1)
-                bw_bb_img = np.where(labeled_arr == np.argsort(roi_sizes)[-3], 1, 0)  # we pick the 3rd largest one because the largest is the background, 2nd is rad field, 3rd is the BB
+                bw_bb_img = np.where(labeled_arr == np.argsort(roi_sizes)[search_region], 1, 0)  # we pick the 3rd largest one because the largest is the background, 2nd is rad field, 3rd is the BB
+
                 bw_bb_img = ndimage.binary_fill_holes(bw_bb_img).astype(int)  # fill holes for low energy beams like 2.5MV
                 bb_regionprops = measure.regionprops(bw_bb_img)[0]
 
+                #print(f"Is round:\t{is_round(bb_regionprops)}\nIs modest size:\t{is_modest_size(bw_bb_img, self.rad_field_bounding_box)}\nIs symmetric:\t{is_symmetric(bw_bb_img)}")
                 if not is_round(bb_regionprops):
                     raise ValueError
                 if not is_modest_size(bw_bb_img, self.rad_field_bounding_box):
                     raise ValueError
                 if not is_symmetric(bw_bb_img):
                     raise ValueError
-            except (IndexError, ValueError):
+            except (IndexError, ValueError) as e:
                 max_thresh -= 0.05 * spread
-                if max_thresh < hmin:
+                if (max_thresh < hmin) and not tried_other_regions:
+                    # Still didn't find the BB. In some images, the region size method is unstable so try the 2nd and 4th largest regions.
+                    search_region = search_regions.pop(0)
+                    if len(search_regions) == 0: # No other regions left to check
+                        tried_other_regions = True
+                    max_thresh = hmax
+                elif (max_thresh < hmin) and tried_other_regions:
                     raise ValueError("Unable to locate the BB. Make sure the field edges do not obscure the BB and that there is no artifacts in the images.")
             else:
                 found = True
@@ -1099,7 +1112,7 @@ def is_symmetric(logical_array: np.ndarray) -> bool:
     ymin, ymax, xmin, xmax = bounding_box(logical_array)
     y = abs(ymax - ymin)
     x = abs(xmax - xmin)
-    if x > max(y * 1.05, y + 3) or x < min(y * 0.95, y - 3):
+    if x > max(y * 1.05, y + 4) or x < min(y * 0.95, y - 4):
         return False
     return True
 
