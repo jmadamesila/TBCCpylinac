@@ -51,7 +51,7 @@ ALL = 'All'
 
 class ImageManager(list):
     """Manages the images of a Winston-Lutz test."""
-    def __init__(self, directory: str, use_filenames: bool):
+    def __init__(self, directory: str, use_filenames: bool, pentaguide: bool = False):
         """
         Parameters
         ----------
@@ -65,14 +65,14 @@ class ImageManager(list):
         if isinstance(directory, list):
             for file in directory:
                 if is_dicom_image(file):
-                    img = WLImage(file, use_filenames)
+                    img = WLImage(file, use_filenames, pentaguide)
                     self.append(img)
         elif not osp.isdir(directory):
             raise ValueError("Invalid directory passed. Check the correct method and file was used.")
         else:
             image_files = image.retrieve_image_files(directory)
             for file in image_files:
-                img = WLImage(file, use_filenames)
+                img = WLImage(file, use_filenames, pentaguide)
                 self.append(img)
         if len(self) < 2:
             raise ValueError("<2 valid WL images were found in the folder/file. Ensure you chose the correct folder/file for analysis")
@@ -84,7 +84,7 @@ class WinstonLutz:
     """Class for performing a Winston-Lutz test of the radiation isocenter."""
     images: ImageManager
 
-    def __init__(self, directory: str, use_filenames: bool = False):
+    def __init__(self, directory: str, use_filenames: bool = False, pentaguide: bool = False):
         """
         Parameters
         ----------
@@ -93,6 +93,8 @@ class WinstonLutz:
         use_filenames: bool
             Whether to try to use the file name to determine axis values.
             Useful for Elekta machines that do not include that info in the DICOM data.
+        pentaguide: bool
+            Whether the phantom is a PentaGuide (with the low density air bubble.)
         Examples
         --------
         Run the demo:
@@ -107,7 +109,7 @@ class WinstonLutz:
         ----------
         images : :class:`~pylinac.winston_lutz.ImageManager` instance
         """
-        self.images = ImageManager(directory, use_filenames)
+        self.images = ImageManager(directory, use_filenames, pentaguide)
 
     @classmethod
     def from_demo_images(cls):
@@ -116,7 +118,7 @@ class WinstonLutz:
         return cls.from_zip(demo_file)
 
     @classmethod
-    def from_zip(cls, zfile: str, use_filenames: bool=False):
+    def from_zip(cls, zfile: str, use_filenames: bool=False, pentaguide: bool = False):
         """Instantiate from a zip file rather than a directory.
         Parameters
         ----------
@@ -125,9 +127,11 @@ class WinstonLutz:
         use_filenames : bool
             Whether to interpret axis angles using the filenames.
             Set to true for Elekta machines where the gantry/coll/couch data is not in the DICOM metadata.
+        pentaguide: bool
+            Whether the phantom is a PentaGuide (with the low density air bubble.)
         """
         with TemporaryZipDirectory(zfile) as tmpz:
-            obj = cls(tmpz, use_filenames=use_filenames)
+            obj = cls(tmpz, use_filenames=use_filenames,pentaguide=pentaguide)
         return obj
 
     @classmethod
@@ -774,7 +778,7 @@ class WinstonLutz:
 class WLImage(image.LinacDicomImage):
     """Holds individual Winston-Lutz EPID images, image properties, and automatically finds the field CAX and BB."""
 
-    def __init__(self, file: str, use_filenames: bool):
+    def __init__(self, file: str, use_filenames: bool, pentaguide: bool = False):
         """
         Parameters
         ----------
@@ -783,6 +787,8 @@ class WLImage(image.LinacDicomImage):
         use_filenames: bool
             Whether to try to use the file name to determine axis values.
             Useful for Elekta machines that do not include that info in the DICOM data.
+        pentaguide: bool
+            Whether the phantom is a PentaGuide (with the low density air bubble.)
         """
         super().__init__(file, use_filenames=use_filenames)
         self.file = osp.basename(file)
@@ -791,6 +797,7 @@ class WLImage(image.LinacDicomImage):
         self._clean_edges()
         self.ground()
         self.normalize()
+        self.pentaguide = pentaguide
         self.field_cax, self.rad_field_bounding_box = self._find_field_centroid()
         self.bb = self._find_bb()
 
@@ -867,6 +874,89 @@ class WLImage(image.LinacDicomImage):
         Point
             The weighted-pixel value location of the BB.
         """
+        # Support for the low density air bubble within the QUASAR Pentaguide (requires cv2)
+        if self.pentaguide:
+            import cv2
+
+            # Load the DICOM image array
+            img = self.array.copy()  # Get the image data from your dcm object
+            
+            # Threshold the image to detect the white box (brightest region)
+            _, thresh = cv2.threshold(img, img.max() * 0.5, 255, cv2.THRESH_BINARY)
+
+            # Find contours in the thresholded image to locate the white box
+            contours, _ = cv2.findContours(thresh.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            # Find the largest contour which should correspond to the white box
+            contour_areas = [cv2.contourArea(c) for c in contours]
+            largest_contour_index = np.argmax(contour_areas)
+            x, y, w, h = cv2.boundingRect(contours[largest_contour_index])
+
+            # Crop the image to the bounding box around the white region
+            cropped_img = img[y:y+h, x:x+w]
+
+            # Upscale the cropped image by 10x
+            upscale_factor = 10
+            upscaled_img = cv2.resize(
+                cropped_img,
+                (cropped_img.shape[1] * upscale_factor, cropped_img.shape[0] * upscale_factor),
+                interpolation=cv2.INTER_LINEAR
+            )
+
+            # Apply Gamma Correction to enhance contrast. Best gamma = 20 found through optimization
+            gamma = 20  # Gamma > 1 will darken the image, Gamma < 1 will brighten the image
+            gamma_corrected = np.array(upscaled_img ** gamma)
+
+            # Normalize the array and convert units to apply edge detection
+            gamma_corrected = cv2.normalize(gamma_corrected, None, 0, 255, cv2.NORM_MINMAX)
+            gamma_corrected = gamma_corrected.astype(np.uint8)
+
+            # Apply a gaussian blur
+            blurred_img = cv2.GaussianBlur(gamma_corrected, (11, 11), 0)
+
+            # Apply Hough Circle Transform to detect circular objects (such as a BB). Internal central BB is a 1.2 cm diameter air pocket.
+            # Best Params are param1 = 8, param2 = 30 found through optimization
+            circles = cv2.HoughCircles(blurred_img, cv2.HOUGH_GRADIENT, dp=2, minDist=15*upscale_factor*self.dpmm,
+                                    param1=8, param2=30, minRadius=round(5.6*upscale_factor*self.dpmm), maxRadius=round(6*upscale_factor*self.dpmm))
+            
+            circles = np.uint16(np.around(circles))
+            if len(circles) > 1:
+                print("More than one circular object found! Selecting only the first circle found")
+            circle = circles[0,0]
+
+            # Recalculate the locations on the original uncropped image
+            crop_x, crop_y, radius = circle
+            bb_x = x + round(crop_x/upscale_factor)
+            bb_y = y + round(crop_y/upscale_factor)
+
+            # Plotting for debugging purposes
+            #_, ax = plt.subplots(1, 3, figsize=(18, 6))
+
+            # Original cropped image
+            #ax[0].imshow(cropped_img, cmap='gray')
+            #ax[0].set_title('Original Cropped Image')
+
+            #ax[1].imshow(blurred_img, cmap='gray')
+            #ax[1].set_title('Contrast Enhanced')
+
+            #x_mm = crop_x / self.dpmm / upscale_factor
+            #y_mm = crop_y / self.dpmm / upscale_factor
+            #radius_mm = radius / self.dpmm / upscale_factor
+
+            # Draw the outer circle
+            #for circle in circles[0,:]:
+            #    crop_x, crop_y, radius = circle
+            #    cv2.circle(blurred_img, (crop_x, crop_y), radius, (255, 0, 0), 1*upscale_factor)
+
+            # Show the circles on the image
+            #ax[2].imshow(blurred_img, cmap='gray')
+            #ax[2].set_title(f'Detected Circles (Hough Transform)\n(x, y) = ({x_mm:.2f} mm, {y_mm:.2f} mm)\nr = {radius_mm:.2f} mm')
+
+            #plt.show()
+
+            return Point(bb_x, bb_y)
+
+        # Regular code for the IsoCube WL
         # get initial starting conditions
         def crop_center(img, cropx, cropy):
             y, x = self.shape
