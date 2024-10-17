@@ -897,6 +897,7 @@ class WLImage(image.LinacDicomImage):
 
             # Upscale the cropped image by 10x
             upscale_factor = 10
+            self.upscale_factor = upscale_factor
             upscaled_img = cv2.resize(
                 cropped_img,
                 (cropped_img.shape[1] * upscale_factor, cropped_img.shape[0] * upscale_factor),
@@ -930,27 +931,28 @@ class WLImage(image.LinacDicomImage):
             bb_y = y + round(crop_y/upscale_factor)
 
             # Plotting for debugging purposes
-            #_, ax = plt.subplots(1, 3, figsize=(18, 6))
+            self.complete_analysis_plot, ax = plt.subplots(1, 3, figsize=(18, 6))
 
             # Original cropped image
-            #ax[0].imshow(cropped_img, cmap='gray')
-            #ax[0].set_title('Original Cropped Image')
+            ax[0].imshow(cropped_img, cmap='gray')
+            ax[0].set_title('Original Cropped Image')
 
-            #ax[1].imshow(blurred_img, cmap='gray')
-            #ax[1].set_title('Contrast Enhanced')
+            ax[1].imshow(blurred_img, cmap='gray')
+            ax[1].set_title('Contrast Enhanced')
 
-            #x_mm = crop_x / self.dpmm / upscale_factor
-            #y_mm = crop_y / self.dpmm / upscale_factor
-            #radius_mm = radius / self.dpmm / upscale_factor
+            x_mm = crop_x / self.dpmm / upscale_factor
+            y_mm = crop_y / self.dpmm / upscale_factor
+            radius_mm = radius / self.dpmm / upscale_factor
 
             # Draw the outer circle
-            #for circle in circles[0,:]:
-            #    crop_x, crop_y, radius = circle
-            #    cv2.circle(blurred_img, (crop_x, crop_y), radius, (255, 0, 0), 1*upscale_factor)
+            for circle in circles[0,:]:
+                crop_x, crop_y, radius = circle
+                cv2.circle(blurred_img, (crop_x, crop_y), radius, (255, 0, 0), 1*upscale_factor)
 
             # Show the circles on the image
-            #ax[2].imshow(blurred_img, cmap='gray')
-            #ax[2].set_title(f'Detected Circles (Hough Transform)\n(x, y) = ({x_mm:.2f} mm, {y_mm:.2f} mm)\nr = {radius_mm:.2f} mm')
+            self.bb_analysis_plot = blurred_img.copy()
+            ax[2].imshow(blurred_img, cmap='gray')
+            ax[2].set_title(f'Detected Circles (Hough Transform)\n(x, y) = ({x_mm:.2f} mm, {y_mm:.2f} mm)\nr = {radius_mm:.2f} mm')
 
             #plt.show()
 
